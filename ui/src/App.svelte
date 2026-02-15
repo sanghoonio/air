@@ -435,7 +435,7 @@
       if (DEMO) {
         loadStatus = "Loading demo data";
         await paint();
-        const res = await fetch("/demo-data.json");
+        const res = await fetch(import.meta.env.BASE_URL + "demo-data.json");
         const contentType = res.headers.get("content-type") || "";
         if (!res.ok || !contentType.includes("json")) {
           throw new Error("No demo data found. Run: npm run fetch-demo");
