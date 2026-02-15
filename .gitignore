@@ -1,0 +1,9 @@
+node_modules/
+dist/
+ui/public/demo-data.json
+data/
+.DS_Store
+*.Rproj
+.Rproj.user/
+.env
+.env.*
