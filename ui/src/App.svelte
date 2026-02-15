@@ -3,6 +3,7 @@
   import * as topojson from "topojson-client";
   import world from "world-atlas/countries-110m.json";
   import { RefreshCw } from "lucide-svelte";
+  import { parquetReadObjects } from "hyparquet";
 
   // ── Grid config ─────────────────────────────────────────────────────────────
 
@@ -403,6 +404,147 @@
   let rawCache = $state<Map<string, RawDatum> | null>(null);
   let mapContainer = $state<HTMLDivElement>(undefined!);
 
+  // ── Historical mode ───────────────────────────────────────────────────────
+
+  let mode = $state<"live" | "historical">("historical");
+  let histLoading = $state(false);
+  let histError = $state<string | null>(null);
+  let histIndex = $state<Map<string, Map<string, RawDatum>> | null>(null);
+  let histDates = $state<string[]>([]);
+  let selectedDateIdx = $state(0);
+  let selectedDate = $derived(histDates[selectedDateIdx] ?? "");
+  let sliderPct = $derived(histDates.length > 1 ? (selectedDateIdx / (histDates.length - 1)) * 100 : 0);
+  let isPlaying = $state(false);
+  let playInterval = $state<ReturnType<typeof setInterval> | null>(null);
+  const SPEEDS = [800, 400, 200, 100] as const;
+  const SPEED_LABELS = ["▶", "▶▶", "▶▶▶", "▶▶▶▶"] as const;
+  let speedIdx = $state(0);
+  let playSpeed = $derived(SPEEDS[speedIdx]);
+
+  async function loadHistory() {
+    if (histIndex) {
+      renderHistoricalDate();
+      return;
+    }
+
+    loading = true;
+    histLoading = true;
+    histError = null;
+    error = null;
+    loadPct = 0;
+    loadStatus = "Loading historical data";
+
+    try {
+      await paint();
+      const res = await fetch(import.meta.env.BASE_URL + "grid-history.parquet");
+      if (!res.ok) throw new Error(`Failed to fetch parquet: ${res.status}`);
+
+      loadPct = 30;
+      loadStatus = "Reading parquet";
+      await paint();
+
+      const buffer = await res.arrayBuffer();
+
+      loadPct = 50;
+      loadStatus = "Parsing data";
+      await paint();
+
+      const rows = await parquetReadObjects({ file: buffer });
+
+      loadPct = 70;
+      loadStatus = "Building index";
+      await paint();
+
+      const index = new Map<string, Map<string, RawDatum>>();
+      for (const row of rows) {
+        const dateStr = String(row.date);
+        const lat = Number(row.lat);
+        const lon = Number(row.lon);
+        const key = `${Math.round(lat * 10) / 10},${Math.round(lon * 10) / 10}`;
+
+        if (!index.has(dateStr)) index.set(dateStr, new Map());
+
+        const speed = Number(row.wind_speed) || 0;
+        const dir = Number(row.wind_direction) || 0;
+        const rad = dir * DEG;
+        index.get(dateStr)!.set(key, {
+          u: -speed * Math.sin(rad),
+          v: -speed * Math.cos(rad),
+          aqi: row.us_aqi != null ? Number(row.us_aqi) : null,
+        });
+      }
+
+      histIndex = index;
+      histDates = [...index.keys()].sort();
+      selectedDateIdx = histDates.length - 1;
+
+      loadPct = 90;
+      loadStatus = "Interpolating";
+      await paint();
+
+      renderHistoricalDate();
+      loadPct = 100;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      histError = msg;
+      error = msg;
+    } finally {
+      loading = false;
+      histLoading = false;
+    }
+  }
+
+  function renderHistoricalDate() {
+    if (!histIndex) return;
+    const date = histDates[selectedDateIdx];
+    if (!date) return;
+    const dayRaw = histIndex.get(date);
+    if (!dayRaw) return;
+    rawCache = dayRaw;
+    vectors = interpolateGrid(dayRaw, FETCH, interp);
+    cityData = computeCityData(VISIBLE_CITIES, vectors, STEP / interp);
+  }
+
+  function switchMode(newMode: "live" | "historical") {
+    if (newMode === mode) return;
+    if (isPlaying) togglePlay();
+    error = null;
+    mode = newMode;
+    if (mode === "live") {
+      fetchData();
+    } else {
+      if (histIndex) {
+        renderHistoricalDate();
+      } else {
+        loadHistory();
+      }
+    }
+  }
+
+  function startPlayback() {
+    if (playInterval) clearInterval(playInterval);
+    playInterval = setInterval(() => {
+      selectedDateIdx = (selectedDateIdx + 1) % histDates.length;
+      renderHistoricalDate();
+    }, playSpeed);
+  }
+
+  function togglePlay() {
+    if (isPlaying) {
+      if (playInterval) clearInterval(playInterval);
+      playInterval = null;
+      isPlaying = false;
+    } else {
+      isPlaying = true;
+      startPlayback();
+    }
+  }
+
+  function cycleSpeed() {
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    if (isPlaying) startPlayback();
+  }
+
   // ── Fetch data ──────────────────────────────────────────────────────────────
 
   /** Yield to browser so progress bar actually paints */
@@ -626,7 +768,8 @@
   $effect(() => {
     if (mapContainer && !fetched) {
       fetched = true;
-      fetchData();
+      if (mode === "historical") loadHistory();
+      else fetchData();
     }
   });
 </script>
@@ -669,33 +812,93 @@
     </div>
 
     <!-- Controls — bottom right -->
-    <div class="absolute bottom-2 right-2 flex items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5">
-      {#if DEMO}
-        <span class="text-[10px] font-medium text-warning">DEMO</span>
+    <div class="absolute bottom-2 right-2 flex items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5 max-w-[min(36rem,calc(100vw-1rem))]">
+      {#if mode === "historical"}
+        <button onclick={togglePlay} class="opacity-50 hover:opacity-100 transition-opacity" title={isPlaying ? "Pause" : "Play"}>
+          {#if isPlaying}
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+          {:else}
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          {/if}
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, histDates.length - 1)}
+          bind:value={selectedDateIdx}
+          oninput={() => renderHistoricalDate()}
+          class="hist-slider flex-1 min-w-48"
+          style="background:linear-gradient(to right,rgba(255,255,255,0.7) {sliderPct}%,rgba(255,255,255,0.15) {sliderPct}%)"
+        />
+        <span class="text-[10px] opacity-60 whitespace-nowrap">{selectedDate}</span>
         <span class="opacity-20">·</span>
-      {/if}
-      {#if lastUpdated}
-        <span class="text-[10px] opacity-60">{lastUpdated.toLocaleTimeString("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" })} KST {#if DEMO} ({timeAgo(lastUpdated)}){/if}</span>
+        <button onclick={cycleSpeed} class="text-[10px] opacity-50 hover:opacity-80 transition-opacity tabular-nums" title="Playback speed">{SPEED_LABELS[speedIdx]}</button>
         <span class="opacity-20">·</span>
-      {/if}
-      <select
-        class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer"
-        title="Interpolation factor"
-        value={interp}
-        onchange={(e) => { interp = Number(e.currentTarget.value); reinterpolate(); }}
-      >
-        {#each [1, 2, 3, 4, 5] as v}
-          <option value={v}>×{v}</option>
-        {/each}
-      </select>
-      <span class="opacity-20">·</span>
-      <button class="opacity-50 hover:opacity-100 transition-opacity disabled:opacity-20" onclick={fetchData} disabled={loading} title="Refresh">
-        <RefreshCw size={12} class={loading ? "animate-spin" : ""} />
-      </button>
-      {#if !DEMO}
+        <select
+          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer"
+          title="Interpolation factor"
+          value={interp}
+          onchange={(e) => { interp = Number(e.currentTarget.value); renderHistoricalDate(); }}
+        >
+          {#each [1, 2, 3, 4, 5] as v}
+            <option value={v}>×{v}</option>
+          {/each}
+        </select>
         <span class="opacity-20">·</span>
-        <a href="?demo" class="text-[10px] opacity-40 hover:opacity-80 transition-opacity" title="Load demo data">demo</a>
+        <button onclick={() => switchMode("live")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Live</button>
+      {:else}
+        {#if DEMO}
+          <span class="text-[10px] font-medium text-warning">DEMO</span>
+          <span class="opacity-20">·</span>
+        {/if}
+        {#if lastUpdated}
+          <span class="text-[10px] opacity-60">{lastUpdated.toLocaleTimeString("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" })} KST {#if DEMO} ({timeAgo(lastUpdated)}){/if}</span>
+          <span class="opacity-20">·</span>
+        {/if}
+        <select
+          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer"
+          title="Interpolation factor"
+          value={interp}
+          onchange={(e) => { interp = Number(e.currentTarget.value); reinterpolate(); }}
+        >
+          {#each [1, 2, 3, 4, 5] as v}
+            <option value={v}>×{v}</option>
+          {/each}
+        </select>
+        <span class="opacity-20">·</span>
+        <button class="opacity-50 hover:opacity-100 transition-opacity disabled:opacity-20" onclick={fetchData} disabled={loading} title="Refresh">
+          <RefreshCw size={12} class={loading ? "animate-spin" : ""} />
+        </button>
+        <span class="opacity-20">·</span>
+        <button onclick={() => switchMode("historical")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Historical</button>
       {/if}
     </div>
   </div>
 </div>
+
+<style>
+  .hist-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  .hist-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: white;
+    cursor: pointer;
+  }
+  .hist-slider::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: white;
+    border: none;
+    cursor: pointer;
+  }
+</style>

@@ -57,6 +57,18 @@ ensure_dir <- function(path) {
   invisible(path)
 }
 
+# ── Grid constants (for historical grid data) ───────────────────────────────
+
+GRID_LON_MIN    <- 88
+GRID_LON_MAX    <- 162
+GRID_LAT_MIN    <- 18
+GRID_LAT_MAX    <- 58
+GRID_STEP       <- 2
+GRID_DATE_START <- "2023-02-15"
+GRID_DATE_END   <- "2026-02-15"
+
+PATH_GRID_HISTORY <- here("ui", "public", "grid-history.parquet")
+
 # ── httr2 request builders ────────────────────────────────────────────────────
 
 #' Build an Open-Meteo historical weather request
@@ -91,4 +103,37 @@ openmeteo_dust_req <- function(lat, lon, start, end, hourly_vars,
     ) |>
     req_retry(max_tries = 3, backoff = ~ 2) |>
     req_throttle(rate = 5 / 60)
+}
+
+#' Build a multi-location weather archive request (comma-separated coords)
+openmeteo_weather_grid_req <- function(lats, lons, start, end, daily_vars,
+                                       wind_unit = "ms") {
+  request("https://archive-api.open-meteo.com/v1/archive") |>
+    req_url_query(
+      latitude  = paste(lats, collapse = ","),
+      longitude = paste(lons, collapse = ","),
+      start_date = start,
+      end_date   = end,
+      daily = paste(daily_vars, collapse = ","),
+      wind_speed_unit = wind_unit,
+      timezone = "UTC"
+    ) |>
+    req_retry(max_tries = 5, backoff = ~ 15) |>
+    req_throttle(rate = 4 / 60, realm = "open-meteo.com")
+}
+
+#' Build a multi-location air quality request (comma-separated coords)
+openmeteo_aq_grid_req <- function(lats, lons, start, end, hourly_vars) {
+  request("https://air-quality-api.open-meteo.com/v1/air-quality") |>
+    req_url_query(
+      latitude  = paste(lats, collapse = ","),
+      longitude = paste(lons, collapse = ","),
+      start_date = start,
+      end_date   = end,
+      hourly  = paste(hourly_vars, collapse = ","),
+      domains = "cams_global",
+      timezone = "UTC"
+    ) |>
+    req_retry(max_tries = 5, backoff = ~ 15) |>
+    req_throttle(rate = 4 / 60, realm = "open-meteo.com")
 }
