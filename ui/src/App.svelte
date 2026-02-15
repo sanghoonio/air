@@ -407,8 +407,6 @@
   // ── Historical mode ───────────────────────────────────────────────────────
 
   let mode = $state<"live" | "historical">("historical");
-  let histLoading = $state(false);
-  let histError = $state<string | null>(null);
   let histIndex = $state<Map<string, Map<string, RawDatum>> | null>(null);
   let histDates = $state<string[]>([]);
   let selectedDateIdx = $state(0);
@@ -418,8 +416,10 @@
   let playInterval = $state<ReturnType<typeof setInterval> | null>(null);
   const SPEEDS = [800, 400, 200, 100] as const;
   const SPEED_LABELS = ["▶", "▶▶", "▶▶▶", "▶▶▶▶"] as const;
-  let speedIdx = $state(0);
+  let speedIdx = $state(1);
   let playSpeed = $derived(SPEEDS[speedIdx]);
+  let animEnabled = $state(false);
+  let animFrameId = 0;
 
   async function loadHistory() {
     if (histIndex) {
@@ -428,8 +428,6 @@
     }
 
     loading = true;
-    histLoading = true;
-    histError = null;
     error = null;
     loadPct = 0;
     loadStatus = "Loading historical data";
@@ -486,11 +484,9 @@
       loadPct = 100;
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
-      histError = msg;
       error = msg;
     } finally {
       loading = false;
-      histLoading = false;
     }
   }
 
@@ -537,6 +533,14 @@
     } else {
       isPlaying = true;
       startPlayback();
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (mode !== "historical") return;
+    if (e.code === "Space" && e.target === document.body) {
+      e.preventDefault();
+      togglePlay();
     }
   }
 
@@ -681,15 +685,12 @@
     return () => ro.disconnect();
   });
 
-  $effect(() => {
-    if (!mapContainer || vectors.length === 0) return;
+  let lastPlotWidth = 0;
+  let lastPlotHeight = 0;
 
-    const width = containerWidth;
-    const height = containerHeight;
-    if (height < 10) return;
-
+  function buildPlot(width: number, height: number) {
     const b = VIEW;
-    const plot = Plot.plot({
+    return Plot.plot({
       width,
       height,
       length: { type: "identity" },
@@ -723,7 +724,7 @@
           y: "lat",
           r: 2,
           fill: "#e5e7eb",
-          fillOpacity: 0.33,
+          fillOpacity: 0.37,
         }),
 
         // Wind vector field — arrows colored by AQI
@@ -731,9 +732,9 @@
           x: "lon",
           y: "lat",
           rotate: (d: VectorDatum) => (d.windDirection + 180) % 360,
-          length: (d: VectorDatum) => 5 + (d.windSpeed / 15) * 15,
+          length: (d: VectorDatum) => d.windSpeed < 0.1 ? 0 : 5 + (d.windSpeed / 15) * 15,
           stroke: (d: VectorDatum) => aqiColor(d.aqi),
-          strokeOpacity: 0.33,
+          strokeOpacity: 0.37,
           strokeWidth: 2,
           anchor: "middle",
         }),
@@ -758,7 +759,124 @@
         })),
       ],
     });
+  }
 
+  // ── rAF vector animation helpers ─────────────────────────────────────────
+
+  function parseAngle(t: string | null): number {
+    const m = t?.match(/rotate\((-?[\d.]+)/);
+    return m ? +m[1] : 0;
+  }
+
+  function parseRGB(s: string | null): [number, number, number] {
+    if (!s) return [107, 114, 128];
+    const m = s.match(/(\d+),\s*(\d+),\s*(\d+)/);
+    return m ? [+m[1], +m[2], +m[3]] : [107, 114, 128];
+  }
+
+  function lerpAngle(a: number, b: number, t: number): number {
+    const d = ((b - a + 540) % 360) - 180;
+    return a + d * t;
+  }
+
+  interface VecFrom { angle: number; rgb: [number, number, number] }
+  interface VecTo extends VecFrom { transform: string; stroke: string }
+
+  function animateVectors(
+    els: Element[],
+    from: VecFrom[],
+    to: VecTo[],
+    newEls: Element[],
+    duration: number,
+  ) {
+    if (animFrameId) cancelAnimationFrame(animFrameId);
+    const n = els.length;
+
+    // Snap shape attributes immediately (d for path, x1/y1/x2/y2 for line)
+    for (let i = 0; i < n; i++) {
+      for (const attr of ["d", "x1", "y1", "x2", "y2"]) {
+        const v = newEls[i].getAttribute(attr);
+        if (v !== null) els[i].setAttribute(attr, v);
+      }
+    }
+
+    const start = performance.now();
+
+    function tick(now: number) {
+      const raw = Math.min(1, (now - start) / duration);
+      const t = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
+
+      for (let i = 0; i < n; i++) {
+        const f = from[i], tw = to[i], el = els[i];
+        const angle = lerpAngle(f.angle, tw.angle, t);
+        el.setAttribute("transform", tw.transform.replace(/rotate\(-?[\d.]+/, `rotate(${angle}`));
+        const r = Math.round(f.rgb[0] + (tw.rgb[0] - f.rgb[0]) * t);
+        const g = Math.round(f.rgb[1] + (tw.rgb[1] - f.rgb[1]) * t);
+        const b = Math.round(f.rgb[2] + (tw.rgb[2] - f.rgb[2]) * t);
+        el.setAttribute("stroke", `rgb(${r},${g},${b})`);
+      }
+
+      if (raw < 1) {
+        animFrameId = requestAnimationFrame(tick);
+      } else {
+        animFrameId = 0;
+        for (let i = 0; i < n; i++) {
+          els[i].setAttribute("transform", to[i].transform);
+          els[i].setAttribute("stroke", to[i].stroke);
+        }
+      }
+    }
+
+    animFrameId = requestAnimationFrame(tick);
+  }
+
+  $effect(() => {
+    if (!mapContainer || vectors.length === 0) return;
+
+    const width = containerWidth;
+    const height = containerHeight;
+    if (height < 10) return;
+
+    const plot = buildPlot(width, height);
+
+    // In historical mode with same container size, animate vectors in-place
+    const sizeChanged = width !== lastPlotWidth || height !== lastPlotHeight;
+    const existing = mapContainer.firstElementChild;
+    if (mode === "historical" && animEnabled && !sizeChanged && existing) {
+        // Observable Plot renders vectors as <path> (arrow shape), fall back to <line>
+        let vecSel = 'g[aria-label="vector"] path';
+        let oldEls = [...existing.querySelectorAll(vecSel)];
+        if (oldEls.length === 0) {
+          vecSel = 'g[aria-label="vector"] line';
+          oldEls = [...existing.querySelectorAll(vecSel)];
+        }
+        const newEls = [...plot.querySelectorAll(vecSel)];
+
+        if (oldEls.length === newEls.length && oldEls.length > 0) {
+          if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
+
+          const from: VecFrom[] = oldEls.map(el => ({
+            angle: parseAngle(el.getAttribute("transform")),
+            rgb: parseRGB(el.getAttribute("stroke")),
+          }));
+          const to: VecTo[] = newEls.map(el => ({
+            angle: parseAngle(el.getAttribute("transform")),
+            rgb: parseRGB(el.getAttribute("stroke")),
+            transform: el.getAttribute("transform") || "",
+            stroke: el.getAttribute("stroke") || "",
+          }));
+
+          animateVectors(oldEls, from, to, newEls, 400);
+          lastPlotWidth = width;
+          lastPlotHeight = height;
+          return;
+        }
+    }
+
+    // Full replace (first render, resize, mode change, interp change)
+    if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
+    lastPlotWidth = width;
+    lastPlotHeight = height;
     mapContainer.replaceChildren(plot);
   });
 
@@ -774,6 +892,7 @@
   });
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
 <div class="h-screen overflow-hidden bg-base-200 p-2">
   <div class="card bg-base-100 shadow-sm border border-base-300 overflow-hidden h-full relative">
     <div bind:this={mapContainer} class="w-full h-full"></div>
@@ -844,6 +963,8 @@
             <option value={v}>×{v}</option>
           {/each}
         </select>
+        <span class="opacity-20">·</span>
+        <button onclick={() => animEnabled = !animEnabled} class="text-[10px] transition-opacity {animEnabled ? 'opacity-70' : 'opacity-40 hover:opacity-60'}" title="Animate transitions">Animate</button>
         <span class="opacity-20">·</span>
         <button onclick={() => switchMode("live")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Live</button>
       {:else}
