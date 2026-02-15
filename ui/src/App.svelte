@@ -538,9 +538,26 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (mode !== "historical") return;
-    if (e.code === "Space" && e.target === document.body) {
+    if (e.target !== document.body) return;
+    if (e.code === "Space") {
       e.preventDefault();
       togglePlay();
+    } else if (e.code === "ArrowLeft") {
+      e.preventDefault();
+      selectedDateIdx = Math.max(0, selectedDateIdx - 1);
+      renderHistoricalDate();
+    } else if (e.code === "ArrowRight") {
+      e.preventDefault();
+      selectedDateIdx = Math.min(histDates.length - 1, selectedDateIdx + 1);
+      renderHistoricalDate();
+    } else if (e.code === "ArrowUp") {
+      e.preventDefault();
+      speedIdx = Math.min(SPEEDS.length - 1, speedIdx + 1);
+      if (isPlaying) startPlayback();
+    } else if (e.code === "ArrowDown") {
+      e.preventDefault();
+      speedIdx = Math.max(0, speedIdx - 1);
+      if (isPlaying) startPlayback();
     }
   }
 
@@ -732,7 +749,7 @@
           x: "lon",
           y: "lat",
           rotate: (d: VectorDatum) => (d.windDirection + 180) % 360,
-          length: (d: VectorDatum) => d.windSpeed < 0.1 ? 0 : 5 + (d.windSpeed / 15) * 15,
+          length: (d: VectorDatum) => 2 * d.windSpeed,
           stroke: (d: VectorDatum) => aqiColor(d.aqi),
           strokeOpacity: 0.37,
           strokeWidth: 2,
