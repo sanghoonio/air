@@ -6,3 +6,4 @@ data/
 .Rproj.user/
 .env
 .env.*
+ui/public/grid-history-full.parquet

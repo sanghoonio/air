@@ -8,7 +8,19 @@ In Korea, it's common knowledge that bad air days come from China. After visitin
 
 ## `ui/` — Wind & AQI Map
 
-Svelte SPA that shows current wind vectors and AQI across NE Asia. Fetches from Open-Meteo (free, no auth), interpolates a coarse grid into a dense vector field with bicubic upsampling, and renders with Observable Plot on a Mercator projection.
+Svelte SPA with two modes:
+
+- **Historical** (default) — loads a pre-built parquet file with daily wind and AQI data across an 800-point grid (2025, ~2 MB shipped; full 3yr file kept locally). Scrub through dates with a slider or hit play to animate. Transitions between days are interpolated at up to 5x grid density.
+- **Live** — queries Open-Meteo's forecast and air quality APIs on demand for current conditions. Can be slow or fail under load.
+
+Interpolates a coarse 2° grid into a dense vector field with bicubic upsampling and renders with Observable Plot on a Mercator projection. Arrows are colored by US AQI.
+
+### Keyboard shortcuts (historical mode)
+
+- `Space` — play/pause
+- `←` / `→` — step one day
+- `↑` / `↓` — change playback speed
+- `a` — toggle animation
 
 ### Setup
 
@@ -18,30 +30,21 @@ npm install
 npm run dev
 ```
 
-### Demo mode
-
-Avoid API rate limits by fetching data once and loading from a local file:
-
-```sh
-npm run fetch-demo   # saves to public/demo-data.json
-```
-
-Then visit `http://localhost:5173/?demo`.
-
 ### Stack
 
-Vite 6, Svelte 5, TypeScript, Tailwind CSS v4, DaisyUI v5, Observable Plot, world-atlas + topojson-client.
+Vite 6, Svelte 5, TypeScript, Tailwind CSS v4, DaisyUI v5, Observable Plot, hyparquet, world-atlas + topojson-client.
 
-## `R/` — Analysis Pipeline
+## `R/` — Data Pipeline
 
-R scripts for fetching and analyzing historical weather and dust/AQI data.
+R scripts for fetching historical weather and dust/AQI data.
 
-- `00_config.R` — shared city coordinates and API config
-- `01_fetch_weather.R` — pull weather data
-- `02_fetch_dust.R` — pull dust/AQI data
+- `00_config.R` — shared city coordinates, grid constants, and API config
+- `01_fetch_weather.R` — pull weather data for 12 cities
+- `02_fetch_dust.R` — pull dust/AQI data for 12 cities
 - `03_check_data.R` — data validation
 - `04_plots.R` — visualization
+- `05_fetch_grid_history.R` — batch-fetch 3yr grid history → `ui/public/grid-history.parquet`
 
 ## How this was built
 
-The `ui/` SPA was built in a single session with Claude Code (Opus 4.6). Sam provided the vision, design direction, and domain decisions — map region, city selection, arrow aesthetics, color scales, layout. Claude handled scaffolding, API integration, interpolation math, and iterative refinement. Most of the session was spent wrestling with Open-Meteo's rate limits and tuning arrow length/opacity/density until it looked right. The bicubic interpolation, demo data pipeline, and caching architecture came out of that back-and-forth.
+The `ui/` SPA was built across a few sessions with Claude Code (Opus 4.6). Sam provided the vision, design direction, and domain decisions — map region, city selection, arrow aesthetics, color scales, layout. Claude handled scaffolding, API integration, interpolation math, animation performance, and iterative refinement. The historical mode, parquet pipeline, and animated transitions were added in a second session. Most debugging time went into getting smooth frame-to-frame animation — caching projected coordinates, snapshotting into typed arrays to avoid Svelte proxy issues, and mapping Observable Plot's clipped elements back to data indices via d3's `__data__` bindings.

@@ -4,6 +4,7 @@
   import world from "world-atlas/countries-110m.json";
   import { RefreshCw } from "lucide-svelte";
   import { parquetReadObjects } from "hyparquet";
+  import { untrack } from "svelte";
 
   // ── Grid config ─────────────────────────────────────────────────────────────
 
@@ -414,11 +415,11 @@
   let sliderPct = $derived(histDates.length > 1 ? (selectedDateIdx / (histDates.length - 1)) * 100 : 0);
   let isPlaying = $state(false);
   let playInterval = $state<ReturnType<typeof setInterval> | null>(null);
-  const SPEEDS = [800, 400, 200, 100] as const;
+  const SPEEDS = [1600, 800, 400, 200] as const;
   const SPEED_LABELS = ["▶", "▶▶", "▶▶▶", "▶▶▶▶"] as const;
   let speedIdx = $state(1);
   let playSpeed = $derived(SPEEDS[speedIdx]);
-  let animEnabled = $state(false);
+  let animEnabled = $state(true);
   let animFrameId = 0;
 
   async function loadHistory() {
@@ -474,7 +475,7 @@
 
       histIndex = index;
       histDates = [...index.keys()].sort();
-      selectedDateIdx = histDates.length - 1;
+      selectedDateIdx = 0;
 
       loadPct = 90;
       loadStatus = "Interpolating";
@@ -507,7 +508,10 @@
     error = null;
     mode = newMode;
     if (mode === "live") {
-      fetchData();
+      // Don't auto-fetch; show prompt to query manually
+      vectors = [];
+      rawCache = null;
+      lastUpdated = null;
     } else {
       if (histIndex) {
         renderHistoricalDate();
@@ -538,7 +542,8 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (mode !== "historical") return;
-    if (e.target !== document.body) return;
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
     if (e.code === "Space") {
       e.preventDefault();
       togglePlay();
@@ -558,6 +563,9 @@
       e.preventDefault();
       speedIdx = Math.max(0, speedIdx - 1);
       if (isPlaying) startPlayback();
+    } else if (e.key === "a") {
+      e.preventDefault();
+      animEnabled = !animEnabled;
     }
   }
 
@@ -704,6 +712,7 @@
 
   let lastPlotWidth = 0;
   let lastPlotHeight = 0;
+  let lastPlotInterp = 0;
 
   function buildPlot(width: number, height: number) {
     const b = VIEW;
@@ -778,12 +787,7 @@
     });
   }
 
-  // ── rAF vector animation helpers ─────────────────────────────────────────
-
-  function parseAngle(t: string | null): number {
-    const m = t?.match(/rotate\((-?[\d.]+)/);
-    return m ? +m[1] : 0;
-  }
+  // ── Direct vector update (skips Plot.plot() rebuild per frame) ──────────
 
   function parseRGB(s: string | null): [number, number, number] {
     if (!s) return [107, 114, 128];
@@ -796,27 +800,64 @@
     return a + d * t;
   }
 
-  interface VecFrom { angle: number; rgb: [number, number, number] }
-  interface VecTo extends VecFrom { transform: string; stroke: string }
+  // Cached projection coords, element refs, and data-index mapping
+  let cachedPx: Float64Array | null = null;
+  let cachedPy: Float64Array | null = null;
+  let vecEls: Element[] | null = null;
+  let cachedIdx: Uint16Array | null = null; // maps element i → vectors[cachedIdx[i]]
 
-  function animateVectors(
-    els: Element[],
-    from: VecFrom[],
-    to: VecTo[],
-    newEls: Element[],
+  // Previous frame's pre-computed values (plain typed arrays, no Svelte proxies)
+  let prevA: Float64Array | null = null; // angles
+  let prevL: Float64Array | null = null; // lengths
+  let prevR: Uint8Array | null = null;   // rgb red
+  let prevG: Uint8Array | null = null;   // rgb green
+  let prevB: Uint8Array | null = null;   // rgb blue
+
+  const R3 = (v: number) => Math.round(v * 1000) / 1000;
+
+  function setVecEl(el: Element, d: VectorDatum, px: number, py: number) {
+    const angle = (d.windDirection + 180) % 360;
+    const len = d.windSpeed < 0.1 ? 0 : 2 * d.windSpeed;
+    const hl = len / 2, w = len / 5;
+    el.setAttribute("transform",
+      `translate(${R3(px)},${R3(py)}) rotate(${R3(angle)}) translate(0,${R3(hl)})`);
+    el.setAttribute("d",
+      `M0,0L0,${R3(-len)}M${R3(-w)},${R3(w - len)}L0,${R3(-len)}L${R3(w)},${R3(w - len)}`);
+    el.setAttribute("stroke", aqiColor(d.aqi));
+  }
+
+  function applyVecFrame(vecs: VectorDatum[]) {
+    if (!vecEls || !cachedPx || !cachedPy || !cachedIdx) return;
+    for (let i = 0; i < vecEls.length; i++) {
+      setVecEl(vecEls[i], vecs[cachedIdx[i]], cachedPx[i], cachedPy[i]);
+    }
+  }
+
+  /** Snapshot visible vector data into plain typed arrays (uses cachedIdx mapping) */
+  function snapshotVecs(vecs: VectorDatum[]) {
+    const idx = cachedIdx!;
+    const n = idx.length;
+    const a = new Float64Array(n), l = new Float64Array(n);
+    const r = new Uint8Array(n), g = new Uint8Array(n), b = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const d = vecs[idx[i]];
+      a[i] = (d.windDirection + 180) % 360;
+      l[i] = d.windSpeed < 0.1 ? 0 : 2 * d.windSpeed;
+      const c = parseRGB(aqiColor(d.aqi));
+      r[i] = c[0]; g[i] = c[1]; b[i] = c[2];
+    }
+    return { a, l, r, g, b };
+  }
+
+  function animateVecTransition(
+    fA: Float64Array, fL: Float64Array, fR: Uint8Array, fG: Uint8Array, fB: Uint8Array,
+    tA: Float64Array, tL: Float64Array, tR: Uint8Array, tG: Uint8Array, tB: Uint8Array,
     duration: number,
   ) {
     if (animFrameId) cancelAnimationFrame(animFrameId);
-    const n = els.length;
-
-    // Snap shape attributes immediately (d for path, x1/y1/x2/y2 for line)
-    for (let i = 0; i < n; i++) {
-      for (const attr of ["d", "x1", "y1", "x2", "y2"]) {
-        const v = newEls[i].getAttribute(attr);
-        if (v !== null) els[i].setAttribute(attr, v);
-      }
-    }
-
+    if (!vecEls || !cachedPx || !cachedPy) return;
+    const n = vecEls.length;
+    const els = vecEls, px = cachedPx, py = cachedPy;
     const start = performance.now();
 
     function tick(now: number) {
@@ -824,27 +865,44 @@
       const t = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
 
       for (let i = 0; i < n; i++) {
-        const f = from[i], tw = to[i], el = els[i];
-        const angle = lerpAngle(f.angle, tw.angle, t);
-        el.setAttribute("transform", tw.transform.replace(/rotate\(-?[\d.]+/, `rotate(${angle}`));
-        const r = Math.round(f.rgb[0] + (tw.rgb[0] - f.rgb[0]) * t);
-        const g = Math.round(f.rgb[1] + (tw.rgb[1] - f.rgb[1]) * t);
-        const b = Math.round(f.rgb[2] + (tw.rgb[2] - f.rgb[2]) * t);
-        el.setAttribute("stroke", `rgb(${r},${g},${b})`);
+        const angle = lerpAngle(fA[i], tA[i], t);
+        const len = fL[i] + (tL[i] - fL[i]) * t;
+        const hl = len / 2, w = len / 5;
+        const r = Math.round(fR[i] + (tR[i] - fR[i]) * t);
+        const g = Math.round(fG[i] + (tG[i] - fG[i]) * t);
+        const b = Math.round(fB[i] + (tB[i] - fB[i]) * t);
+
+        els[i].setAttribute("transform",
+          `translate(${R3(px[i])},${R3(py[i])}) rotate(${R3(angle)}) translate(0,${R3(hl)})`);
+        els[i].setAttribute("d",
+          `M0,0L0,${R3(-len)}M${R3(-w)},${R3(w - len)}L0,${R3(-len)}L${R3(w)},${R3(w - len)}`);
+        els[i].setAttribute("stroke", `rgb(${r},${g},${b})`);
       }
 
       if (raw < 1) {
         animFrameId = requestAnimationFrame(tick);
       } else {
         animFrameId = 0;
-        for (let i = 0; i < n; i++) {
-          els[i].setAttribute("transform", to[i].transform);
-          els[i].setAttribute("stroke", to[i].stroke);
-        }
       }
     }
 
     animFrameId = requestAnimationFrame(tick);
+  }
+
+  function cacheVecElements() {
+    const els = [...mapContainer.querySelectorAll('g[aria-label="vector"] path')];
+    vecEls = els;
+    const n = els.length;
+    cachedPx = new Float64Array(n);
+    cachedPy = new Float64Array(n);
+    cachedIdx = new Uint16Array(n);
+    for (let i = 0; i < n; i++) {
+      const tr = els[i].getAttribute("transform") || "";
+      const m = tr.match(/translate\(([^,]+),([^)]+)\)/);
+      if (m) { cachedPx[i] = +m[1]; cachedPy[i] = +m[2]; }
+      // d3 binds the data index to __data__ on each element
+      cachedIdx[i] = (els[i] as any).__data__ ?? i;
+    }
   }
 
   $effect(() => {
@@ -854,47 +912,36 @@
     const height = containerHeight;
     if (height < 10) return;
 
-    const plot = buildPlot(width, height);
+    const interpNow = interp;
+    const needsRebuild = width !== lastPlotWidth || height !== lastPlotHeight || interpNow !== lastPlotInterp;
 
-    // In historical mode with same container size, animate vectors in-place
-    const sizeChanged = width !== lastPlotWidth || height !== lastPlotHeight;
-    const existing = mapContainer.firstElementChild;
-    if (mode === "historical" && animEnabled && !sizeChanged && existing) {
-        // Observable Plot renders vectors as <path> (arrow shape), fall back to <line>
-        let vecSel = 'g[aria-label="vector"] path';
-        let oldEls = [...existing.querySelectorAll(vecSel)];
-        if (oldEls.length === 0) {
-          vecSel = 'g[aria-label="vector"] line';
-          oldEls = [...existing.querySelectorAll(vecSel)];
-        }
-        const newEls = [...plot.querySelectorAll(vecSel)];
+    // Fast path: update existing vector elements directly (no Plot rebuild)
+    if (!needsRebuild && vecEls && vecEls.length > 0 && cachedPx && cachedIdx) {
+      if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
 
-        if (oldEls.length === newEls.length && oldEls.length > 0) {
-          if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
+      const snap = snapshotVecs(vectors);
 
-          const from: VecFrom[] = oldEls.map(el => ({
-            angle: parseAngle(el.getAttribute("transform")),
-            rgb: parseRGB(el.getAttribute("stroke")),
-          }));
-          const to: VecTo[] = newEls.map(el => ({
-            angle: parseAngle(el.getAttribute("transform")),
-            rgb: parseRGB(el.getAttribute("stroke")),
-            transform: el.getAttribute("transform") || "",
-            stroke: el.getAttribute("stroke") || "",
-          }));
-
-          animateVectors(oldEls, from, to, newEls, 400);
-          lastPlotWidth = width;
-          lastPlotHeight = height;
-          return;
-        }
+      if (mode === "historical" && animEnabled && prevA && prevA.length === snap.a.length) {
+        const dur = untrack(() => isPlaying ? playSpeed : 400);
+        animateVecTransition(prevA, prevL!, prevR!, prevG!, prevB!,
+                             snap.a, snap.l, snap.r, snap.g, snap.b, dur);
+      } else {
+        applyVecFrame(vectors);
+      }
+      prevA = snap.a; prevL = snap.l; prevR = snap.r; prevG = snap.g; prevB = snap.b;
+      return;
     }
 
-    // Full replace (first render, resize, mode change, interp change)
+    // Slow path: full Plot rebuild (first render, resize, interp change)
     if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
+    const plot = buildPlot(width, height);
     lastPlotWidth = width;
     lastPlotHeight = height;
+    lastPlotInterp = interpNow;
     mapContainer.replaceChildren(plot);
+    cacheVecElements();
+    const snap = snapshotVecs(vectors);
+    prevA = snap.a; prevL = snap.l; prevR = snap.r; prevG = snap.g; prevB = snap.b;
   });
 
   // ── Init: fetch once container is available ─────────────────────────────────
@@ -932,25 +979,42 @@
         <div class="text-center flex flex-col items-center gap-2">
           <p class="font-semibold text-error">Failed to load data</p>
           <p class="text-sm text-error opacity-70">{error}</p>
-          {#if isRateLimited}
-            <a href="?demo" class="btn btn-sm bg-base-content text-base-100 border-base-content mt-1">Load demo?</a>
-          {/if}
+          <button onclick={() => { error = null; switchMode("historical"); }} class="btn btn-sm bg-base-content text-base-100 border-base-content mt-1">Load Historical</button>
+        </div>
+      </div>
+    {:else if mode === "live" && !loading && vectors.length === 0}
+      <div
+        class="absolute inset-0 flex items-center justify-center bg-base-100"
+      >
+        <div class="text-center flex flex-col items-center gap-3 max-w-xs">
+          <p class="text-sm opacity-70">Live queries can be slow or fail under load.</p>
+          <button onclick={fetchData} class="btn btn-sm bg-base-content text-base-100 border-base-content">Query Live Data</button>
         </div>
       </div>
     {/if}
 
-    <!-- Legend — bottom left -->
-    <div class="absolute bottom-2 left-2 flex items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5">
+    <!-- Legend — bottom-left on wide, top-right vertical on narrow -->
+    <div class="absolute bottom-2 left-2 lg:flex hidden items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5">
       {#each AQI_BANDS as band}
         <span class="w-2 h-2 rounded-full shrink-0" style="background-color: {band.color};" title={band.label}></span>
         <span class="text-[10px] opacity-60">{band.label}</span>
       {/each}
+      <span class="text-[10px] opacity-40 ml-0.5">US AQI</span>
+    </div>
+    <div class="absolute top-2 right-2 lg:hidden flex flex-col gap-1 bg-base-100/80 backdrop-blur-sm rounded px-2 py-1.5">
+      <span class="text-[10px] opacity-40">US AQI</span>
+      {#each AQI_BANDS as band}
+        <div class="flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full shrink-0" style="background-color: {band.color};" title={band.label}></span>
+          <span class="text-[10px] opacity-60">{band.label}</span>
+        </div>
+      {/each}
     </div>
 
     <!-- Controls — bottom right -->
-    <div class="absolute bottom-2 right-2 flex items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5 max-w-[min(36rem,calc(100vw-1rem))]">
+    <div class="panel-controls absolute bottom-2 right-2 flex items-center gap-1.5 bg-base-100/80 backdrop-blur-sm rounded px-2.5 py-1.5 max-w-[min(36rem,calc(100vw-1rem))]">
       {#if mode === "historical"}
-        <button onclick={togglePlay} class="opacity-50 hover:opacity-100 transition-opacity" title={isPlaying ? "Pause" : "Play"}>
+        <button tabindex="-1" onclick={togglePlay} class="opacity-50 hover:opacity-100 transition-opacity" title={isPlaying ? "Pause" : "Play"}>
           {#if isPlaying}
             <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
           {:else}
@@ -961,17 +1025,18 @@
           type="range"
           min="0"
           max={Math.max(0, histDates.length - 1)}
-          bind:value={selectedDateIdx}
-          oninput={() => renderHistoricalDate()}
+          value={selectedDateIdx}
+          oninput={(e) => { selectedDateIdx = Number(e.currentTarget.value); renderHistoricalDate(); }}
           class="hist-slider flex-1 min-w-48"
           style="background:linear-gradient(to right,rgba(255,255,255,0.7) {sliderPct}%,rgba(255,255,255,0.15) {sliderPct}%)"
         />
         <span class="text-[10px] opacity-60 whitespace-nowrap">{selectedDate}</span>
         <span class="opacity-20">·</span>
-        <button onclick={cycleSpeed} class="text-[10px] opacity-50 hover:opacity-80 transition-opacity tabular-nums" title="Playback speed">{SPEED_LABELS[speedIdx]}</button>
+        <button tabindex="-1" onclick={cycleSpeed} class="text-[10px] opacity-50 hover:opacity-80 transition-opacity tabular-nums" title="Playback speed">{SPEED_LABELS[speedIdx]}</button>
         <span class="opacity-20">·</span>
         <select
-          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer"
+          tabindex="-1"
+          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer appearance-none border-none"
           title="Interpolation factor"
           value={interp}
           onchange={(e) => { interp = Number(e.currentTarget.value); renderHistoricalDate(); }}
@@ -981,9 +1046,9 @@
           {/each}
         </select>
         <span class="opacity-20">·</span>
-        <button onclick={() => animEnabled = !animEnabled} class="text-[10px] transition-opacity {animEnabled ? 'opacity-70' : 'opacity-40 hover:opacity-60'}" title="Animate transitions">Animate</button>
+        <button tabindex="-1" onclick={() => animEnabled = !animEnabled} class="text-[10px] transition-opacity {animEnabled ? 'opacity-70' : 'opacity-40 hover:opacity-60'}" title="Animate transitions">Animate</button>
         <span class="opacity-20">·</span>
-        <button onclick={() => switchMode("live")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Live</button>
+        <button tabindex="-1" onclick={() => switchMode("live")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">→ Live</button>
       {:else}
         {#if DEMO}
           <span class="text-[10px] font-medium text-warning">DEMO</span>
@@ -994,7 +1059,8 @@
           <span class="opacity-20">·</span>
         {/if}
         <select
-          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer"
+          tabindex="-1"
+          class="text-[10px] opacity-50 bg-transparent outline-none cursor-pointer appearance-none border-none"
           title="Interpolation factor"
           value={interp}
           onchange={(e) => { interp = Number(e.currentTarget.value); reinterpolate(); }}
@@ -1004,11 +1070,11 @@
           {/each}
         </select>
         <span class="opacity-20">·</span>
-        <button class="opacity-50 hover:opacity-100 transition-opacity disabled:opacity-20" onclick={fetchData} disabled={loading} title="Refresh">
+        <button tabindex="-1" class="opacity-50 hover:opacity-100 transition-opacity disabled:opacity-20" onclick={fetchData} disabled={loading} title="Refresh">
           <RefreshCw size={12} class={loading ? "animate-spin" : ""} />
         </button>
         <span class="opacity-20">·</span>
-        <button onclick={() => switchMode("historical")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Historical</button>
+        <button tabindex="-1" onclick={() => switchMode("historical")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">→ Historical</button>
       {/if}
     </div>
   </div>
@@ -1038,5 +1104,10 @@
     background: white;
     border: none;
     cursor: pointer;
+  }
+  :global(.panel-controls button:focus),
+  :global(.panel-controls select:focus) {
+    outline: none;
+    box-shadow: none;
   }
 </style>
