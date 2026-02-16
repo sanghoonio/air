@@ -4,7 +4,7 @@ Wind and air quality monitoring for NE China, Korea, and Japan.
 
 ## Why
 
-In Korea, it's common knowledge that bad air days come from China. After visiting family in Korea for the first time in 15 years, I kept hearing this — but when you actually look at the wind patterns, the story is more complicated. Sometimes the wind is blowing offshore and the air is still bad. This project puts wind direction and AQI on the same map so you can see for yourself where it's coming from on any given day.
+I built this to visualize how wind patterns carry air pollution across Northeast Asia. While yellow dust has been a geological phenomenon for millennia, some Koreans are still quick to blame China for all of our air quality issues. I still see the sentiment reinforced online. It even came up visiting relatives in Korea for the first time in 15 years. Just how much of the dust is actually from Central Asian deserts, Chinese manufacturing hubs, or Korea itself? Perhaps this map can help answer that.
 
 ## `ui/` — Wind & AQI Map
 
