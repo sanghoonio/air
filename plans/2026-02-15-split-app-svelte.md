@@ -1,6 +1,6 @@
 ---
 date: 2026-02-15
-status: draft
+status: complete
 description: Split monolithic App.svelte into lib modules and Svelte components
 ---
 
