@@ -4,6 +4,7 @@ data/
 .DS_Store
 *.Rproj
 .Rproj.user/
+.Rhistory
 .env
 .env.*
 ui/public/grid-history-full.parquet
