@@ -1,10 +1,8 @@
 # air
 
-Wind and air quality monitoring for NE China, Korea, and Japan.
+Wind and air quality monitoring for Northern China, Korea, and Japan.
 
-## Why
-
-I built this to visualize how wind patterns carry air pollution across Northeast Asia. While yellow dust has been a geological phenomenon for millennia, some Koreans are still quick to blame China for all of our air quality issues. I still see the sentiment reinforced online. It even came up visiting relatives in Korea for the first time in 15 years. Just how much of the dust is actually from Central Asian deserts, Chinese manufacturing hubs, or Korea itself? Perhaps this map can help answer that.
+I built this to visualize how wind patterns carry air pollution across Northeast Asia. While yellow dust has been a geological phenomenon for millennia, some Koreans are still quick to blame China for our air quality issues. I still see the sentiment reinforced online. It even came up visiting relatives in Korea for the first time in 15 years. Just how much of the dust is actually from Central Asian deserts, Chinese manufacturing hubs, or Korea itself? Perhaps this map can help answer that.
 
 ## `ui/` — Wind & AQI Map
 

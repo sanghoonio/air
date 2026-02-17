@@ -8,7 +8,7 @@
       <p>
         I built this to visualize how wind patterns carry air pollution across
         Northeast Asia. While yellow dust has been a geological phenomenon for 
-        millennia, some Koreans are still quick to blame China for all of our 
+        millennia, some Koreans are still quick to blame China for our 
         air quality issues. I still see the sentiment reinforced online. It
         even came up visiting relatives in Korea for the first time in 15
         years. Just how much of the dust is actually from Central Asian
