@@ -19,10 +19,7 @@ GRID_AQ_VARS <- c(
   "us_aqi", "european_aqi",
   "pm2_5", "pm10",
   "dust", "aerosol_optical_depth",
-  "carbon_monoxide", "nitrogen_dioxide", "sulphur_dioxide", "ozone",
-  "us_aqi_pm2_5", "us_aqi_pm10",
-  "us_aqi_ozone", "us_aqi_nitrogen_dioxide",
-  "us_aqi_sulphur_dioxide", "us_aqi_carbon_monoxide"
+  "carbon_monoxide", "nitrogen_dioxide", "sulphur_dioxide", "ozone"
 )
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -195,8 +192,18 @@ main <- function() {
   cli_h1("Writing output")
   cli_alert_info("Total rows: {nrow(all_data)}")
 
+  # ── Optimize types for smaller parquet ──
+  all_data$lat <- as.integer(all_data$lat)
+  all_data$lon <- as.integer(all_data$lon)
+  all_data$wind_direction <- as.integer(all_data$wind_direction)
+  all_data$wind_speed <- round(all_data$wind_speed, 2)
+  for (v in GRID_AQ_VARS) {
+    if (v %in% names(all_data)) all_data[[v]] <- round(all_data[[v]], 1)
+  }
+
   ensure_dir(PATH_GRID_HISTORY)
-  write_parquet(all_data, PATH_GRID_HISTORY)
+  write_parquet(all_data, PATH_GRID_HISTORY,
+                compression = "snappy")
   cli_alert_success(
     "Wrote {PATH_GRID_HISTORY} ({round(file.size(PATH_GRID_HISTORY) / 1e6, 1)} MB)"
   )
