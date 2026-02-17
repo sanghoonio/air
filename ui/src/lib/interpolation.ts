@@ -1,4 +1,4 @@
-import type { Bounds, RawDatum, VectorDatum } from "./types";
+import type { Bounds, MetricKey, RawDatum, VectorDatum } from "./types";
 import { STEP } from "./config";
 
 export const INTERP_DEFAULT = typeof window !== "undefined" && window.innerWidth < 640 ? 3 : 5;
@@ -25,11 +25,23 @@ function val(
   raw: Map<string, RawDatum>,
   lat: number,
   lon: number,
-  field: "u" | "v" | "aqi"
+  field: "u" | "v",
 ): number {
   const d = raw.get(`${r1(lat)},${r1(lon)}`);
   if (!d) return 0;
-  return (d[field] as number) ?? 0;
+  return d[field] ?? 0;
+}
+
+/** Look up a metric value from the raw grid, returning 0 if missing */
+function metricVal(
+  raw: Map<string, RawDatum>,
+  lat: number,
+  lon: number,
+  metricKey: MetricKey,
+): number {
+  const d = raw.get(`${r1(lat)},${r1(lon)}`);
+  if (!d) return 0;
+  return d.metrics[metricKey] ?? 0;
 }
 
 /**
@@ -40,7 +52,8 @@ function val(
 export function interpolateGrid(
   raw: Map<string, RawDatum>,
   area: Bounds,
-  interp: number
+  interp: number,
+  metricKey: MetricKey = "us_aqi",
 ): VectorDatum[] {
   const fineStep = STEP / interp;
   const out: VectorDatum[] = [];
@@ -57,7 +70,7 @@ export function interpolateGrid(
 
       const rowU: number[] = [];
       const rowV: number[] = [];
-      const rowA: number[] = [];
+      const rowM: number[] = [];
 
       for (const rLat of latRows) {
         rowU.push(cubic(
@@ -68,15 +81,15 @@ export function interpolateGrid(
           val(raw, rLat, lonCols[0], "v"), val(raw, rLat, lonCols[1], "v"),
           val(raw, rLat, lonCols[2], "v"), val(raw, rLat, lonCols[3], "v"), fx
         ));
-        rowA.push(cubic(
-          val(raw, rLat, lonCols[0], "aqi"), val(raw, rLat, lonCols[1], "aqi"),
-          val(raw, rLat, lonCols[2], "aqi"), val(raw, rLat, lonCols[3], "aqi"), fx
+        rowM.push(cubic(
+          metricVal(raw, rLat, lonCols[0], metricKey), metricVal(raw, rLat, lonCols[1], metricKey),
+          metricVal(raw, rLat, lonCols[2], metricKey), metricVal(raw, rLat, lonCols[3], metricKey), fx
         ));
       }
 
       const u = cubic(rowU[0], rowU[1], rowU[2], rowU[3], fy);
       const v = cubic(rowV[0], rowV[1], rowV[2], rowV[3], fy);
-      const aqi = cubic(rowA[0], rowA[1], rowA[2], rowA[3], fy);
+      const m = cubic(rowM[0], rowM[1], rowM[2], rowM[3], fy);
 
       const speed = Math.sqrt(u * u + v * v);
       const dir = ((Math.atan2(-u, -v) / DEG) + 360) % 360;
@@ -86,7 +99,7 @@ export function interpolateGrid(
         lon: r1(lon),
         windSpeed: speed,
         windDirection: dir,
-        aqi: Math.max(0, aqi),
+        metric: Math.max(0, m),
       });
     }
   }
@@ -111,7 +124,7 @@ export function computeCityData(
       name: c.name,
       lat: c.lat,
       lon: c.lon,
-      aqi: best?.aqi ?? null,
+      metric: best?.metric ?? null,
       windSpeed: best ? Math.round(best.windSpeed * 10) / 10 : 0,
       windDir: best ? Math.round(best.windDirection) : 0,
     };

@@ -5,20 +5,24 @@
   import { parquetReadObjects } from "hyparquet";
   import { untrack } from "svelte";
 
-  import type { GridPoint, VectorDatum, RawDatum, CityDatum } from "./lib/types";
+  import type { GridPoint, VectorDatum, RawDatum, CityDatum, MetricKey } from "./lib/types";
   import { STEP, VIEW, FETCH, buildGrid, padBounds, interpBounds, CITY_COORDS, VISIBLE_CITIES } from "./lib/config";
-  import { aqiColor } from "./lib/aqi";
+  import { AQI_BANDS } from "./lib/aqi";
   import { INTERP_DEFAULT, DEG, interpolateGrid, computeCityData } from "./lib/interpolation";
-  import { paint, timeAgo } from "./lib/utils";
+  import { paint } from "./lib/utils";
+  import { VARIABLE_CONFIGS, getVariableConfig, metricColor, generateBands } from "./lib/variables";
 
   import AqiLegend from "./AqiLegend.svelte";
   import InfoModal from "./InfoModal.svelte";
   import LoadingOverlay from "./LoadingOverlay.svelte";
   import ControlPanel from "./ControlPanel.svelte";
 
-  // ── Demo mode ──────────────────────────────────────────────────────────────
-
-  const DEMO = new URLSearchParams(window.location.search).has("demo");
+  // ── All metric keys we parse from parquet / live API ──────────────────────
+  const ALL_METRIC_KEYS: MetricKey[] = [
+    "us_aqi", "european_aqi", "pm2_5", "pm10", "dust",
+    "aerosol_optical_depth", "carbon_monoxide", "nitrogen_dioxide",
+    "sulphur_dioxide", "ozone",
+  ];
 
   // ── State ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +39,24 @@
   let rawCache = $state<Map<string, RawDatum> | null>(null);
   let liveCache: { raw: Map<string, RawDatum>; vectors: VectorDatum[]; cityData: CityDatum[]; lastUpdated: Date } | null = null;
   let mapContainer = $state<HTMLDivElement>(undefined!);
+
+  // ── Variable selection ──────────────────────────────────────────────────────
+
+  let selectedMetric = $state<MetricKey>("us_aqi");
+  let selectedVarConfig = $derived(getVariableConfig(selectedMetric));
+  let legendBands = $derived(
+    selectedVarConfig.colorType === "aqi" ? AQI_BANDS : generateBands(selectedVarConfig)
+  );
+
+  function handleSelectMetric(key: MetricKey) {
+    selectedMetric = key;
+    // Re-interpolate with the new metric from cached raw data
+    if (mode === "historical") {
+      renderHistoricalDate();
+    } else {
+      reinterpolate();
+    }
+  }
 
   // ── Historical mode ───────────────────────────────────────────────────────
 
@@ -97,10 +119,16 @@
         const speed = Number(row.wind_speed) || 0;
         const dir = Number(row.wind_direction) || 0;
         const rad = dir * DEG;
+
+        const metrics: Partial<Record<MetricKey, number | null>> = {};
+        for (const mk of ALL_METRIC_KEYS) {
+          metrics[mk] = row[mk] != null ? Number(row[mk]) : null;
+        }
+
         index.get(dateStr)!.set(key, {
           u: -speed * Math.sin(rad),
           v: -speed * Math.cos(rad),
-          aqi: row.us_aqi != null ? Number(row.us_aqi) : null,
+          metrics,
         });
       }
 
@@ -129,7 +157,7 @@
     const dayRaw = histIndex.get(date);
     if (!dayRaw) return;
     rawCache = dayRaw;
-    vectors = interpolateGrid(dayRaw, interpArea, interp);
+    vectors = interpolateGrid(dayRaw, interpArea, interp, selectedMetric);
     cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, STEP / interp);
   }
 
@@ -184,9 +212,10 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (mode !== "historical") return;
     const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+    if (mode !== "historical") return;
     if (e.code === "Space") {
       e.preventDefault();
       togglePlay();
@@ -229,53 +258,34 @@
     loadStatus = `Fetching wind for ${grid.length} points`;
 
     try {
-      let allWeather: any[];
-      let allAq: any[];
+      const lats = grid.map((p) => p.lat).join(",");
+      const lons = grid.map((p) => p.lon).join(",");
 
-      if (DEMO) {
-        loadStatus = "Loading demo data";
-        await paint();
-        const res = await fetch(import.meta.env.BASE_URL + "demo-data.json");
-        const contentType = res.headers.get("content-type") || "";
-        if (!res.ok || !contentType.includes("json")) {
-          throw new Error("No demo data found. Run: npm run fetch-demo");
-        }
-        const demo = await res.json();
-        allWeather = demo.weather;
-        allAq = demo.airQuality;
-        grid = demo.grid;
-        lastUpdated = new Date(demo.fetchedAt);
-        loadPct = 55;
-        loadStatus = "Parsing responses";
-        await paint();
-      } else {
-        const lats = grid.map((p) => p.lat).join(",");
-        const lons = grid.map((p) => p.lon).join(",");
+      const wFetch = fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`
+      );
+      const aqVars = ALL_METRIC_KEYS.join(",");
+      const aFetch = fetch(
+        `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lats}&longitude=${lons}&current=${aqVars}&domains=cams_global`
+      );
 
-        const wFetch = fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`
-        );
-        const aFetch = fetch(
-          `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lats}&longitude=${lons}&current=us_aqi,pm2_5&domains=cams_global`
-        );
+      const wRes = await wFetch;
+      if (!wRes.ok) throw new Error(`Weather API: ${wRes.status}`);
+      loadPct = 30;
+      loadStatus = "Fetching AQI data";
+      await paint();
 
-        const wRes = await wFetch;
-        if (!wRes.ok) throw new Error(`Weather API: ${wRes.status}`);
-        loadPct = 30;
-        loadStatus = "Fetching AQI data";
-        await paint();
+      const aRes = await aFetch;
+      if (!aRes.ok) throw new Error(`AQ API: ${aRes.status}`);
+      loadPct = 55;
+      loadStatus = "Parsing responses";
+      await paint();
 
-        const aRes = await aFetch;
-        if (!aRes.ok) throw new Error(`AQ API: ${aRes.status}`);
-        loadPct = 55;
-        loadStatus = "Parsing responses";
-        await paint();
+      const wJson = await wRes.json();
+      const aJson = await aRes.json();
+      const allWeather: any[] = Array.isArray(wJson) ? wJson : [wJson];
+      const allAq: any[] = Array.isArray(aJson) ? aJson : [aJson];
 
-        const wJson = await wRes.json();
-        const aJson = await aRes.json();
-        allWeather = Array.isArray(wJson) ? wJson : [wJson];
-        allAq = Array.isArray(aJson) ? aJson : [aJson];
-      }
       loadPct = 75;
       const interpCount = grid.length * interp * interp;
       loadStatus = `Interpolating ×${interp} → ${interpCount.toLocaleString()} vectors`;
@@ -289,21 +299,27 @@
         const speed: number = w?.wind_speed_10m ?? 0;
         const dir: number = w?.wind_direction_10m ?? 0;
         const rad = dir * DEG;
+
+        const metrics: Partial<Record<MetricKey, number | null>> = {};
+        for (const mk of ALL_METRIC_KEYS) {
+          metrics[mk] = a?.[mk] ?? null;
+        }
+
         raw.set(`${pt.lat},${pt.lon}`, {
           u: -speed * Math.sin(rad),
           v: -speed * Math.cos(rad),
-          aqi: a?.us_aqi ?? null,
+          metrics,
         });
       }
 
       rawCache = raw;
-      vectors = interpolateGrid(raw, interpArea, interp);
+      vectors = interpolateGrid(raw, interpArea, interp, selectedMetric);
       const fineStep = STEP / interp;
       cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, fineStep);
       loadPct = 100;
       loadStatus = "Rendering";
 
-      if (!DEMO) lastUpdated = new Date();
+      lastUpdated = new Date();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       error = msg;
@@ -316,7 +332,7 @@
   /** Re-interpolate from cached raw data (no API call) */
   function reinterpolate() {
     if (!rawCache) return;
-    vectors = interpolateGrid(rawCache, interpArea, interp);
+    vectors = interpolateGrid(rawCache, interpArea, interp, selectedMetric);
     const fineStep = STEP / interp;
     cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, fineStep);
   }
@@ -343,9 +359,11 @@
   let lastPlotWidth = 0;
   let lastPlotHeight = 0;
   let lastPlotInterp = 0;
+  let lastPlotMetric: MetricKey | null = null;
 
   function buildPlot(width: number, height: number) {
     const b = VIEW;
+    const cfg = selectedVarConfig;
     return Plot.plot({
       width,
       height,
@@ -387,7 +405,7 @@
           y: "lat",
           rotate: (d: VectorDatum) => (d.windDirection + 180) % 360,
           length: (d: VectorDatum) => 2 * d.windSpeed,
-          stroke: (d: VectorDatum) => aqiColor(d.aqi),
+          stroke: (d: VectorDatum) => metricColor(d.metric, cfg),
           strokeOpacity: 0.37,
           strokeWidth: window.innerWidth < 640 ? 1.5 : 2,
           anchor: "middle",
@@ -400,7 +418,7 @@
           stroke: "#3d4451",
           channels: {
             "": { value: (d: CityDatum) => d.name, label: null },
-            "AQI:": { value: (d: CityDatum) => d.aqi != null ? Math.round(d.aqi) : "N/A" },
+            [`${selectedVarConfig.label}:`]: { value: (d: CityDatum) => d.metric != null ? Math.round(d.metric) : "N/A" },
             "Wind:": {
               value: (d: CityDatum) => {
                 const compass = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"][Math.round(d.windDir / 22.5) % 16];
@@ -448,7 +466,7 @@
       `translate(${R3(px)},${R3(py)}) rotate(${R3(angle)}) translate(0,${R3(hl)})`);
     el.setAttribute("d",
       `M0,0L0,${R3(-len)}M${R3(-w)},${R3(w - len)}L0,${R3(-len)}L${R3(w)},${R3(w - len)}`);
-    el.setAttribute("stroke", aqiColor(d.aqi));
+    el.setAttribute("stroke", metricColor(d.metric, selectedVarConfig));
   }
 
   function applyVecFrame(vecs: VectorDatum[]) {
@@ -459,6 +477,7 @@
   }
 
   function snapshotVecs(vecs: VectorDatum[]) {
+    const cfg = selectedVarConfig;
     const idx = cachedIdx!;
     const n = idx.length;
     const a = new Float64Array(n), l = new Float64Array(n);
@@ -467,7 +486,7 @@
       const d = vecs[idx[i]];
       a[i] = (d.windDirection + 180) % 360;
       l[i] = d.windSpeed < 0.1 ? 0 : 2 * d.windSpeed;
-      const c = parseRGB(aqiColor(d.aqi));
+      const c = parseRGB(metricColor(d.metric, cfg));
       r[i] = c[0]; g[i] = c[1]; b[i] = c[2];
     }
     return { a, l, r, g, b };
@@ -536,7 +555,9 @@
     if (height < 10) return;
 
     const interpNow = interp;
-    const needsRebuild = width !== lastPlotWidth || height !== lastPlotHeight || interpNow !== lastPlotInterp;
+    const metricNow = selectedMetric;
+    const needsRebuild = width !== lastPlotWidth || height !== lastPlotHeight
+      || interpNow !== lastPlotInterp || metricNow !== lastPlotMetric;
 
     if (!needsRebuild && vecEls && vecEls.length > 0 && cachedPx && cachedIdx) {
       if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
@@ -558,13 +579,14 @@
     // Re-interpolate for the new viewport size
     if (rawCache && (width !== lastPlotWidth || height !== lastPlotHeight)) {
       const bounds = interpArea;
-      vectors = interpolateGrid(rawCache, bounds, interpNow);
+      vectors = interpolateGrid(rawCache, bounds, interpNow, metricNow);
       cityData = computeCityData(VISIBLE_CITIES, vectors, bounds, STEP / interpNow);
     }
     const plot = buildPlot(width, height);
     lastPlotWidth = width;
     lastPlotHeight = height;
     lastPlotInterp = interpNow;
+    lastPlotMetric = metricNow;
     mapContainer.replaceChildren(plot);
     cacheVecElements();
     const snap = snapshotVecs(vectors);
@@ -621,7 +643,7 @@
       onSwitchToHistorical={handleSwitchToHistorical}
     />
 
-    <AqiLegend />
+    <AqiLegend bands={legendBands} {selectedMetric} onSelectMetric={handleSelectMetric} />
 
     <ControlPanel
       {mode}
@@ -635,7 +657,6 @@
       {animEnabled}
       {loading}
       {lastUpdated}
-      isDemo={DEMO}
       speedLabels={SPEED_LABELS}
       onTogglePlay={togglePlay}
       onSliderChange={handleSliderChange}

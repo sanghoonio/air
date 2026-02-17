@@ -1,6 +1,5 @@
 <script lang="ts">
   import { RefreshCw } from "lucide-svelte";
-  import { timeAgo } from "./lib/utils";
 
   interface Props {
     mode: "live" | "historical";
@@ -14,7 +13,6 @@
     animEnabled: boolean;
     loading: boolean;
     lastUpdated: Date | null;
-    isDemo: boolean;
     speedLabels: readonly string[];
     onTogglePlay: () => void;
     onSliderChange: (idx: number) => void;
@@ -28,7 +26,7 @@
 
   let {
     mode, isPlaying, histDates, selectedDateIdx, selectedDate, sliderPct,
-    speedIdx, interp, animEnabled, loading, lastUpdated, isDemo, speedLabels,
+    speedIdx, interp, animEnabled, loading, lastUpdated, speedLabels,
     onTogglePlay, onSliderChange, onCycleSpeed, onInterpChange,
     onToggleAnim, onSwitchMode, onFetchData, onShowInfo,
   }: Props = $props();
@@ -79,12 +77,8 @@
     <span class="opacity-20">&middot;</span>
     <button tabindex="-1" onclick={() => onSwitchMode("live")} class="text-[10px] opacity-40 hover:opacity-80 transition-opacity">Live &rarr;</button>
   {:else}
-    {#if isDemo}
-      <span class="text-[10px] font-medium text-warning">DEMO</span>
-      <span class="opacity-20">&middot;</span>
-    {/if}
     {#if lastUpdated}
-      <span class="text-[10px] opacity-60">{lastUpdated.toLocaleTimeString("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" })} KST {#if isDemo} ({timeAgo(lastUpdated)}){/if}</span>
+      <span class="text-[10px] opacity-60">{lastUpdated.toLocaleTimeString("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" })} KST</span>
       <span class="opacity-20">&middot;</span>
     {/if}
     <select

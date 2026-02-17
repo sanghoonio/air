@@ -10,10 +10,10 @@ I built this to visualize how wind patterns carry air pollution across Northeast
 
 Svelte SPA with two modes:
 
-- **Historical** (default) — loads a pre-built parquet file with daily wind and AQI data across an 800-point grid (2025, ~2 MB shipped; full 3yr file kept locally). Scrub through dates with a slider or hit play to animate. Transitions between days are interpolated at up to 5x grid density.
+- **Historical** (default) — loads a pre-built parquet file with daily wind and air quality data across an 800-point grid (2025, ~4.6 MB). Scrub through dates with a slider or hit play to animate. Transitions between days are interpolated at up to 5x grid density.
 - **Live** — queries Open-Meteo's forecast and air quality APIs on demand for current conditions. Can be slow or fail under load.
 
-Interpolates a coarse 2° grid into a dense vector field with bicubic upsampling and renders with Observable Plot on a Mercator projection. Arrows are colored by US AQI.
+Interpolates a coarse 2° grid into a dense vector field with bicubic upsampling and renders with Observable Plot on a Mercator projection. Arrows are colored by a selectable air quality variable (US AQI, EU AQI, PM2.5, PM10, dust, AOD, CO, NO2, SO2, O3) — click the label in the legend to switch.
 
 ### Keyboard shortcuts (historical mode)
 
@@ -39,11 +39,13 @@ Vite 6, Svelte 5, TypeScript, Tailwind CSS v4, DaisyUI v5, Observable Plot, hypa
 R scripts for fetching historical weather and dust/AQI data.
 
 - `00_config.R` — shared city coordinates, grid constants, and API config
-- `01_fetch_weather.R` — pull weather data for 12 cities
-- `02_fetch_dust.R` — pull dust/AQI data for 12 cities
+- `01_fetch_weather.R` — pull daily weather for 12 cities → `data/city-weather.csv`
+- `02_fetch_dust.R` — pull daily AQ for 30 corridor cities → `data/city-aq.csv`
 - `03_check_data.R` — data validation
-- `04_plots.R` — visualization
-- `05_fetch_grid_history.R` — batch-fetch 3yr grid history → `ui/public/grid-history.parquet`
+- `04_plots.R` — exploratory ggplots from city AQ data → `plots/`
+- `05_fetch_grid_history.R` — batch-fetch grid history → `ui/public/grid-history.parquet`
+- `06_inspect_grid.R` — inspect/validate the grid parquet, export CSV
+- `07_repack_parquet.R` — repack parquet with compression optimizations (see `R/README.md`)
 
 ## How this was built
 
