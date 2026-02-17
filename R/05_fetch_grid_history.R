@@ -1,14 +1,13 @@
-# 05_fetch_grid_history.R — Batch-fetch 3yr grid history → parquet
+# 05_fetch_grid_history.R — Batch-fetch grid history → parquet
 #
 # Builds a 2° grid (lon 88–162, lat 18–58 = 798 points),
-# fetches daily wind + hourly AQI in batches of 50 points,
-# aggregates AQI hourly → daily, and writes grid-history.parquet
+# fetches daily wind + hourly AQ in batches of 50 points,
+# aggregates AQ hourly → daily, and writes grid-history.parquet
 # to ui/public/ for the browser historical mode.
 #
 # Usage: Rscript R/05_fetch_grid_history.R
 #
 # ~32 API calls with manual retry + cooldown ≈ 20 min runtime
-# Output: ui/public/grid-history.parquet (~5 MB)
 
 source(here::here("R", "00_config.R"))
 library(purrr)
@@ -16,7 +15,15 @@ library(arrow)
 
 BATCH_SIZE <- 50
 GRID_WEATHER_VARS <- c("wind_speed_10m_mean", "wind_direction_10m_dominant")
-GRID_AQ_VARS <- c("us_aqi", "pm2_5")
+GRID_AQ_VARS <- c(
+  "us_aqi", "european_aqi",
+  "pm2_5", "pm10",
+  "dust", "aerosol_optical_depth",
+  "carbon_monoxide", "nitrogen_dioxide", "sulphur_dioxide", "ozone",
+  "us_aqi_pm2_5", "us_aqi_pm10",
+  "us_aqi_ozone", "us_aqi_nitrogen_dioxide",
+  "us_aqi_sulphur_dioxide", "us_aqi_carbon_monoxide"
+)
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -82,32 +89,32 @@ parse_weather_batch <- function(resp_json, batch_grid) {
 
 # ── Parse multi-location AQ response (hourly → daily) ──────────────────────
 
-parse_aq_batch <- function(resp_json, batch_grid) {
+parse_aq_batch <- function(resp_json, batch_grid, aq_vars) {
   locations <- if (is.null(names(resp_json))) resp_json else list(resp_json)
 
   map2(locations, seq_along(locations), function(loc, i) {
     hourly <- loc$hourly
     times <- unlist(hourly$time)
 
-    tibble(
+    # Build tibble with all requested AQ variables
+    cols <- list(
       datetime = times,
       lat      = round(batch_grid$lat[i], 1),
-      lon      = round(batch_grid$lon[i], 1),
-      us_aqi   = safe_dbl(hourly$us_aqi),
-      pm2_5    = safe_dbl(hourly$pm2_5)
-    ) |>
+      lon      = round(batch_grid$lon[i], 1)
+    )
+    for (v in aq_vars) {
+      cols[[v]] <- if (!is.null(hourly[[v]])) safe_dbl(hourly[[v]]) else rep(NA_real_, length(times))
+    }
+
+    as_tibble(cols) |>
       mutate(date = substr(datetime, 1, 10)) |>
       group_by(date, lat, lon) |>
       summarise(
-        us_aqi = mean(us_aqi, na.rm = TRUE),
-        pm2_5  = mean(pm2_5, na.rm = TRUE),
+        across(all_of(aq_vars), ~ mean(.x, na.rm = TRUE)),
         .groups = "drop"
       ) |>
       mutate(
-        across(
-          c(us_aqi, pm2_5),
-          ~ ifelse(is.finite(.x), .x, NA_real_)
-        )
+        across(all_of(aq_vars), ~ ifelse(is.finite(.x), .x, NA_real_))
       )
   }) |> list_rbind()
 }
@@ -115,7 +122,7 @@ parse_aq_batch <- function(resp_json, batch_grid) {
 # ── Main ────────────────────────────────────────────────────────────────────
 
 main <- function() {
-  cli_h1("Grid History: 3yr daily wind + AQI")
+  cli_h1("Grid History: 2025 daily wind + AQ")
 
   grid <- build_grid()
   cli_alert_info(
@@ -172,7 +179,7 @@ main <- function() {
       label = paste0("AQ batch ", b)
     )
 
-    aq <- parse_aq_batch(aq_resp, batch)
+    aq <- parse_aq_batch(aq_resp, batch, GRID_AQ_VARS)
     cli_alert_success("AQ: {nrow(aq)} rows")
 
     # Cool down between batches
@@ -184,13 +191,6 @@ main <- function() {
     # ── Join ──
     left_join(weather, aq, by = c("date", "lat", "lon"))
   }) |> list_rbind()
-
-  # Ensure column order matches what the browser expects
-  all_data <- all_data |>
-    select(
-      date, lat, lon, wind_speed,
-      wind_direction, us_aqi, pm2_5
-    )
 
   cli_h1("Writing output")
   cli_alert_info("Total rows: {nrow(all_data)}")

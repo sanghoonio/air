@@ -6,7 +6,7 @@
   import { untrack } from "svelte";
 
   import type { GridPoint, VectorDatum, RawDatum, CityDatum } from "./lib/types";
-  import { STEP, VIEW, FETCH, buildGrid, CITY_COORDS, VISIBLE_CITIES } from "./lib/config";
+  import { STEP, VIEW, FETCH, buildGrid, padBounds, interpBounds, CITY_COORDS, VISIBLE_CITIES } from "./lib/config";
   import { aqiColor } from "./lib/aqi";
   import { INTERP_DEFAULT, DEG, interpolateGrid, computeCityData } from "./lib/interpolation";
   import { paint, timeAgo } from "./lib/utils";
@@ -129,8 +129,8 @@
     const dayRaw = histIndex.get(date);
     if (!dayRaw) return;
     rawCache = dayRaw;
-    vectors = interpolateGrid(dayRaw, FETCH, interp);
-    cityData = computeCityData(VISIBLE_CITIES, vectors, STEP / interp);
+    vectors = interpolateGrid(dayRaw, interpArea, interp);
+    cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, STEP / interp);
   }
 
   function switchMode(newMode: "live" | "historical") {
@@ -221,7 +221,7 @@
 
   async function fetchData() {
     if (!mapContainer) return;
-    grid = buildGrid(FETCH);
+    grid = buildGrid(padBounds(interpArea));
 
     loading = true;
     error = null;
@@ -297,9 +297,9 @@
       }
 
       rawCache = raw;
-      vectors = interpolateGrid(raw, FETCH, interp);
+      vectors = interpolateGrid(raw, interpArea, interp);
       const fineStep = STEP / interp;
-      cityData = computeCityData(VISIBLE_CITIES, vectors, fineStep);
+      cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, fineStep);
       loadPct = 100;
       loadStatus = "Rendering";
 
@@ -316,9 +316,9 @@
   /** Re-interpolate from cached raw data (no API call) */
   function reinterpolate() {
     if (!rawCache) return;
-    vectors = interpolateGrid(rawCache, FETCH, interp);
+    vectors = interpolateGrid(rawCache, interpArea, interp);
     const fineStep = STEP / interp;
-    cityData = computeCityData(VISIBLE_CITIES, vectors, fineStep);
+    cityData = computeCityData(VISIBLE_CITIES, vectors, interpArea, fineStep);
   }
 
   // ── Render map ──────────────────────────────────────────────────────────────
@@ -327,6 +327,7 @@
 
   let containerWidth = $state(0);
   let containerHeight = $state(0);
+  let interpArea = $derived(interpBounds(containerWidth || 800, containerHeight || 600));
 
   $effect(() => {
     if (!mapContainer) return;
@@ -554,6 +555,12 @@
     }
 
     if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = 0; }
+    // Re-interpolate for the new viewport size
+    if (rawCache && (width !== lastPlotWidth || height !== lastPlotHeight)) {
+      const bounds = interpArea;
+      vectors = interpolateGrid(rawCache, bounds, interpNow);
+      cityData = computeCityData(VISIBLE_CITIES, vectors, bounds, STEP / interpNow);
+    }
     const plot = buildPlot(width, height);
     lastPlotWidth = width;
     lastPlotHeight = height;

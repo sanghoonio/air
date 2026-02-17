@@ -64,8 +64,8 @@ GRID_LON_MAX    <- 162
 GRID_LAT_MIN    <- 18
 GRID_LAT_MAX    <- 58
 GRID_STEP       <- 2
-GRID_DATE_START <- "2023-02-15"
-GRID_DATE_END   <- "2026-02-15"
+GRID_DATE_START <- "2025-01-01"
+GRID_DATE_END   <- "2025-12-31"
 
 PATH_GRID_HISTORY <- here("ui", "public", "grid-history.parquet")
 

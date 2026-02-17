@@ -16,12 +16,55 @@ export const VIEW: Bounds = {
   latMax: snapUp(CENTER_LAT + MIN_LAT_SPAN / 2),
 };
 
-export const FETCH: Bounds = {
-  lonMin: VIEW.lonMin - 8 * STEP,
-  lonMax: VIEW.lonMax + 8 * STEP,
-  latMin: VIEW.latMin - 8 * STEP,
-  latMax: VIEW.latMax + 8 * STEP,
-};
+const DEG2RAD = Math.PI / 180;
+const mercY = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * DEG2RAD) / 2));
+const invMercY = (y: number) => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) / DEG2RAD;
+
+/** Compute the actual visible geographic bounds for a Mercator projection of VIEW
+ *  fitted into a container of (w × h) pixels, snapped to grid + 1 STEP padding. */
+export function interpBounds(w: number, h: number): Bounds {
+  // Both axes in Mercator radians so the scale comparison is valid
+  const xMin = VIEW.lonMin * DEG2RAD;
+  const xMax = VIEW.lonMax * DEG2RAD;
+  const yMin = mercY(VIEW.latMin);
+  const yMax = mercY(VIEW.latMax);
+
+  const scaleX = w / (xMax - xMin);
+  const scaleY = h / (yMax - yMin);
+  const scale = Math.min(scaleX, scaleY);
+
+  const visXSpan = w / scale;
+  const visYSpan = h / scale;
+
+  const centerX = (xMin + xMax) / 2;
+  const centerY = (yMin + yMax) / 2;
+
+  // Convert back to degrees / lat, snap to grid + 1 STEP, clamp to FETCH
+  const lonLo = (centerX - visXSpan / 2) / DEG2RAD;
+  const lonHi = (centerX + visXSpan / 2) / DEG2RAD;
+  const latLo = invMercY(centerY - visYSpan / 2);
+  const latHi = invMercY(centerY + visYSpan / 2);
+
+  return {
+    lonMin: Math.max(FETCH.lonMin, snapDown(lonLo) - STEP),
+    lonMax: Math.min(FETCH.lonMax, snapUp(lonHi) + STEP),
+    latMin: Math.max(FETCH.latMin, snapDown(latLo) - STEP),
+    latMax: Math.min(FETCH.latMax, snapUp(latHi) + STEP),
+  };
+}
+
+/** Pad bounds by n×STEP for cubic stencil raw data coverage */
+export function padBounds(b: Bounds, n = 2): Bounds {
+  return {
+    lonMin: b.lonMin - n * STEP,
+    lonMax: b.lonMax + n * STEP,
+    latMin: b.latMin - n * STEP,
+    latMax: b.latMax + n * STEP,
+  };
+}
+
+/** Full fetch grid — extends well beyond VIEW for cubic stencil coverage */
+export const FETCH: Bounds = padBounds(VIEW, 8);
 
 export function buildGrid(b: Bounds): GridPoint[] {
   const pts: GridPoint[] = [];

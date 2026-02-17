@@ -1,5 +1,5 @@
 import type { Bounds, RawDatum, VectorDatum } from "./types";
-import { STEP, FETCH } from "./config";
+import { STEP } from "./config";
 
 export const INTERP_DEFAULT = typeof window !== "undefined" && window.innerWidth < 640 ? 3 : 5;
 
@@ -32,6 +32,11 @@ function val(
   return (d[field] as number) ?? 0;
 }
 
+/**
+ * Interpolate a fine grid of vectors over `area` using Catmull-Rom cubic splines.
+ * The raw data Map must extend at least 2×STEP beyond `area` on every side
+ * to provide the 4×4 stencil the cubic kernel requires.
+ */
 export function interpolateGrid(
   raw: Map<string, RawDatum>,
   area: Bounds,
@@ -40,13 +45,8 @@ export function interpolateGrid(
   const fineStep = STEP / interp;
   const out: VectorDatum[] = [];
 
-  const minLat = area.latMin + STEP;
-  const maxLat = area.latMax - STEP;
-  const minLon = area.lonMin + STEP;
-  const maxLon = area.lonMax - STEP;
-
-  for (let lat = minLat; lat <= maxLat + 0.01; lat += fineStep) {
-    for (let lon = minLon; lon <= maxLon + 0.01; lon += fineStep) {
+  for (let lat = area.latMin; lat <= area.latMax + 0.01; lat += fineStep) {
+    for (let lon = area.lonMin; lon <= area.lonMax + 0.01; lon += fineStep) {
       const latBase = snapDown(lat);
       const lonBase = snapDown(lon);
       const fy = (lat - latBase) / STEP;
@@ -97,17 +97,15 @@ export function interpolateGrid(
 export function computeCityData(
   cities: readonly { name: string; lat: number; lon: number }[],
   vecs: VectorDatum[],
+  area: Bounds,
   fineStep: number
 ) {
   const lookup = new Map<string, VectorDatum>();
   for (const v of vecs) lookup.set(`${v.lat},${v.lon}`, v);
 
-  const gridLatStart = FETCH.latMin + STEP;
-  const gridLonStart = FETCH.lonMin + STEP;
-
   return cities.map((c) => {
-    const nearLat = r1(gridLatStart + Math.round((c.lat - gridLatStart) / fineStep) * fineStep);
-    const nearLon = r1(gridLonStart + Math.round((c.lon - gridLonStart) / fineStep) * fineStep);
+    const nearLat = r1(area.latMin + Math.round((c.lat - area.latMin) / fineStep) * fineStep);
+    const nearLon = r1(area.lonMin + Math.round((c.lon - area.lonMin) / fineStep) * fineStep);
     const best = lookup.get(`${nearLat},${nearLon}`);
     return {
       name: c.name,
